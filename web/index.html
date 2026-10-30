@@ -8,10 +8,23 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="site.webmanifest">
 <meta name="theme-color" content="#382EDC">
-<meta property="og:title" content="Dulce Rumbo">
-<meta property="og:description" content="Que tu noche tome el rumbo más dulce. Atrapa los caramelos de tu stack y registra tu puntaje.">
+<meta property="og:site_name" content="Rumbo">
+<meta property="og:title" content="Dulce Rumbo, el juego de Halloween de Rumbo">
+<meta property="og:description" content="Que tu noche tome el rumbo más dulce. Guía al fantasma, atrapa los caramelos de tu stack y registra tu puntaje en el ranking.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="icon-512.png">
+<meta property="og:url" content="https://halloween.rumbo.la/">
+<meta property="og:image" content="https://halloween.rumbo.la/og-image.jpg">
+<meta property="og:image:secure_url" content="https://halloween.rumbo.la/og-image.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1080">
+<meta property="og:image:height" content="1080">
+<meta property="og:image:alt" content="Fantasma de Rumbo con caramelos y calabazas. Que tu noche tome el rumbo más dulce.">
+<meta property="og:locale" content="es_PE">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Dulce Rumbo, el juego de Halloween de Rumbo">
+<meta name="twitter:description" content="Que tu noche tome el rumbo más dulce. Atrapa los caramelos de tu stack y registra tu puntaje.">
+<meta name="twitter:image" content="https://halloween.rumbo.la/og-image.jpg">
+<link rel="canonical" href="https://halloween.rumbo.la/">
 <style>html{color-scheme:dark}body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.min.js"></script>
 </head>
@@ -147,6 +160,15 @@ kbd{font-family:var(--ff-mono);font-size:11px;padding:1px 6px;border-radius:var(
 .drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,100%);border-radius:0;border:0;border-left:1px solid var(--border-strong);box-shadow:var(--shadow-3);z-index:40;overflow:auto;transform:translateX(100%);transition:transform var(--dur-3) var(--ease-out);padding-top:max(20px, env(safe-area-inset-top, 0px));padding-right:max(20px, env(safe-area-inset-right, 0px));padding-bottom:max(20px, env(safe-area-inset-bottom, 0px))}
 .drawer.open{transform:none}
 .backdrop{position:fixed;inset:0;background:rgba(10,10,11,.6);opacity:0;pointer-events:none;transition:opacity var(--dur-2);z-index:39}
+.splash{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;background:radial-gradient(70% 60% at 50% 40%,rgba(56,46,220,.45) 0%,rgba(10,10,11,.92) 70%),var(--rb-ink);padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.splash[hidden]{display:none!important}
+.splash-btn{appearance:none;border:0;background:transparent;color:var(--text);cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:10px;padding:32px;border-radius:var(--radius-4);width:min(420px,100%)}
+.splash-btn:focus-visible{outline:2px solid var(--highlight);outline-offset:4px}
+.splash-ghost{width:64px;height:72px;background:#fff;border-radius:32px 32px 8px 8px;clip-path:polygon(0 0,100% 0,100% 100%,83% 84%,66% 100%,50% 84%,33% 100%,17% 84%,0 100%);box-shadow:0 0 36px rgba(255,255,255,.5);animation:bob 2.4s ease-in-out infinite}
+.splash-title{font-family:var(--ff-display);font-style:italic;font-weight:700;font-size:40px;letter-spacing:-.02em;line-height:1;animation:glow 2.8s ease-in-out infinite}
+.splash-sub{font-family:var(--ff-sans);font-weight:500;font-size:18px;padding:12px 26px;border-radius:var(--radius-2);background:var(--accent);color:var(--accent-fg);animation:pulse 2s ease-in-out infinite;margin-top:8px}
+.splash-hint{font-size:12px;color:var(--text-muted)}
+@media (prefers-reduced-motion:reduce){.splash-ghost,.splash-title,.splash-sub{animation:none}}
 .backdrop.open{opacity:1;pointer-events:auto}
 .board-head .close{margin-left:auto}
 .board-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -305,6 +327,14 @@ kbd{font-family:var(--ff-mono);font-size:11px;padding:1px 6px;border-radius:var(
     </div>
   </section>
 
+  <div class="splash" id="splash" hidden>
+    <button class="splash-btn" type="button" id="enterBtn" aria-label="Entrar al juego con música">
+      <span class="splash-ghost" aria-hidden="true"></span>
+      <span class="splash-title">Dulce Rumbo.</span>
+      <span class="splash-sub">Toca para entrar</span>
+      <span class="splash-hint">🎵 La música empieza al tocar</span>
+    </button>
+  </div>
   <div class="backdrop" id="backdrop"></div>
   <aside class="board drawer" id="drawer" aria-label="Ranking" aria-hidden="true">
     <div class="board-head">
@@ -400,13 +430,19 @@ function startMusic() {
 }
 // Al abrir la página se intenta reproducir de inmediato; si el navegador lo bloquea
 // (política de autoplay), se muestra el aviso y el primer toque la arranca.
+function hideSplash() { $("splash").hidden = true; }
 function tryAutoplay() {
-  if (!musicOn || musicStarted) return;
+  if (!musicOn || musicStarted) { hideSplash(); return; }
   if (!music.src) loadTrack(trackIdx);
-  music.play().then(() => { musicStarted = true; $("musicHint").hidden = true; }).catch(() => { $("musicHint").hidden = false; });
+  music.play().then(() => { musicStarted = true; $("musicHint").hidden = true; hideSplash(); })
+    .catch(() => { if (!musicStarted) $("splash").hidden = false; });
 }
+// Pantalla de entrada: el primer toque (obligatorio para el navegador) arranca la música al instante.
+$("enterBtn").addEventListener("click", () => { startMusic(); hideSplash(); });
+$("splash").addEventListener("pointerdown", () => { startMusic(); });
 tryAutoplay();
 addEventListener("load", tryAutoplay);
+setTimeout(tryAutoplay, 800);
 $("musicBtn").addEventListener("click", () => openMusicPop($("musicPop").hidden));
 $("musicToggle").addEventListener("click", () => setMusicOn(!musicOn));
 $("musicVol").addEventListener("input", e => {

@@ -1,7 +1,8 @@
 // Genera web/index.html (versión alojable con Supabase) a partir de dulce-rumbo.html (versión claude.ai).
 // Uso: node build-web.mjs [SUPABASE_URL] [SUPABASE_ANON_KEY]
 import fs from "node:fs";
-const [,, URL_ARG, KEY_ARG] = process.argv;
+const [,, URL_ARG, KEY_ARG, SITE_ARG] = process.argv;
+const SITE = (SITE_ARG || "https://halloween.rumbo.la").replace(/\/$/, "");
 let html = fs.readFileSync("dulce-rumbo.html", "utf8");
 
 const start = html.indexOf("/* ---------- ranking compartido (db) ---------- */");
@@ -104,10 +105,23 @@ const head = `<!doctype html>
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="manifest" href="site.webmanifest">
 <meta name="theme-color" content="#382EDC">
-<meta property="og:title" content="Dulce Rumbo">
-<meta property="og:description" content="Que tu noche tome el rumbo más dulce. Atrapa los caramelos de tu stack y registra tu puntaje.">
+<meta property="og:site_name" content="Rumbo">
+<meta property="og:title" content="Dulce Rumbo, el juego de Halloween de Rumbo">
+<meta property="og:description" content="Que tu noche tome el rumbo más dulce. Guía al fantasma, atrapa los caramelos de tu stack y registra tu puntaje en el ranking.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="icon-512.png">
+<meta property="og:url" content="${SITE}/">
+<meta property="og:image" content="${SITE}/og-image.jpg">
+<meta property="og:image:secure_url" content="${SITE}/og-image.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1080">
+<meta property="og:image:height" content="1080">
+<meta property="og:image:alt" content="Fantasma de Rumbo con caramelos y calabazas. Que tu noche tome el rumbo más dulce.">
+<meta property="og:locale" content="es_PE">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Dulce Rumbo, el juego de Halloween de Rumbo">
+<meta name="twitter:description" content="Que tu noche tome el rumbo más dulce. Atrapa los caramelos de tu stack y registra tu puntaje.">
+<meta name="twitter:image" content="${SITE}/og-image.jpg">
+<link rel="canonical" href="${SITE}/">
 <style>html{color-scheme:dark}body{margin:0;font:14px system-ui}img{max-width:100%}[hidden]{display:none!important}</style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.min.js"></script>
 </head>
