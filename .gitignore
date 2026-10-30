@@ -1,0 +1,28 @@
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/
+.idea/
+*.swp
+
+# Node (si en el futuro se agrega tooling como Astro)
+node_modules/
+dist/
+.astro/
+npm-debug.log*
+
+# Variables de entorno y secretos (nunca subir claves de servicio)
+.env
+.env.*
+!.env.example
+
+# Archivos temporales y de prueba
+*.log
+*.tmp
+wrapped.html
+mobile-test.html
+
+# Claude Code local
+.claude/settings.local.json

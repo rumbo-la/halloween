@@ -1,0 +1,49 @@
+# Publica la carpeta web/ en GitHub Pages cada vez que se sube a main.
+# Requisito único: en Settings > Pages del repositorio, elegir "GitHub Actions" como origen.
+name: Publicar en GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+
+      - name: Comprobar que el juego tiene las claves de Supabase
+        run: |
+          if grep -q "__SUPABASE_URL__" web/index.html; then
+            echo "web/index.html todavía tiene los marcadores de Supabase. Ejecuta: node build-web.mjs <URL> <CLAVE_PUBLICABLE>"
+            exit 1
+          fi
+
+      - name: Configurar Pages
+        uses: actions/configure-pages@v5
+
+      - name: Empaquetar web/
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Desplegar
+        id: deployment
+        uses: actions/deploy-pages@v4
