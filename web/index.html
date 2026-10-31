@@ -353,7 +353,179 @@ kbd{font-family:var(--ff-mono);font-size:11px;padding:1px 6px;border-radius:var(
 (() => {
 "use strict";
 const $ = id => document.getElementById(id);
-const BASE_W = 400, H = 600, DURATION = 60;
+/* ---------- núcleo del juego (copiado de game-core.js por build-web.mjs, no editar aquí) ---------- */
+// Núcleo determinista de Dulce Rumbo.
+// Lo ejecutan el navegador (inline en dulce-rumbo.html y web/index.html) y la Edge Function game-finish,
+// que vuelve a simular la partida con la misma semilla y los mismos movimientos para calcular el puntaje real.
+// Reglas: sin Math.random (solo g.rng), paso fijo TICK, nada de DOM ni de dibujo.
+const BASE_W = 400, H = 600, DURATION = 60, TICK = 1 / 60, MAX_LEVEL = 5, MAX_SCORE = 5000;
+const MIN_W = 260, MAX_W = 1400;
+const MAX_TICKS = Math.ceil(DURATION / TICK) + 2;
+const TECHS = [
+  {n: "K8s", c: "#326CE5"}, {n: "Docker", c: "#2496ED"}, {n: "Java", c: "#E76F00"}, {n: "TS", c: "#3178C6"},
+  {n: "Go", c: "#00ADD8"}, {n: "Quarkus", c: "#4695EB"}, {n: "Spring", c: "#6DB33F"}, {n: "AWS", c: "#FF9900"},
+  {n: "GCP", c: "#4285F4"}, {n: "Azure", c: "#0078D4"}, {n: "Python", c: "#3776AB"}, {n: "React", c: "#1FB6D8"},
+  {n: "Node", c: "#339933"}, {n: "Terraform", c: "#7B42BC"}, {n: "Kafka", c: "#6E5BE8"}, {n: "Rust", c: "#DEA584"}
+];
+const GOLD_TECH = {n: "rumbo", c: "#FFB020", gold: true};
+const TECH_NAMES = TECHS.map(t => t.n).concat(GOLD_TECH.n);
+
+// Generador pseudoaleatorio con semilla (mulberry32): misma semilla, misma partida.
+function mulberry32(seed) {
+  let a = seed | 0;
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function clampW(w) {
+  const n = Math.round(Number(w) || BASE_W);
+  return Math.max(MIN_W, Math.min(MAX_W, n));
+}
+function levelFor(elapsed) { return elapsed < 10 ? 0 : Math.min(MAX_LEVEL, 1 + Math.floor((elapsed - 10) / 10)); }
+function multFor(combo) { return Math.min(4, 1 + Math.floor(combo / 5)); }
+
+function createGame(seed, w) {
+  const W = clampW(w);
+  return {
+    seed: seed | 0, W, rng: mulberry32(seed), tick: 0, t: 0, timeLeft: DURATION,
+    score: 0, candies: 0, combo: 0, maxCombo: 0, lives: 3, stack: {}, level: 0,
+    ghost: {x: W / 2, target: W / 2, w: 64, h: 78}, items: [],
+    spawnIn: .6, invuln: 0, shake: 0, ended: false, endReason: ""
+  };
+}
+
+function spawn(g) {
+  const lvl = g.level, W = g.W, rnd = g.rng;
+  const roll = rnd();
+  const batP = .09 + lvl * .045, pumpP = .045, goldP = .06;
+  let type = "candy";
+  if (roll < batP) type = "bat"; else if (roll < batP + pumpP) type = "pumpkin"; else if (roll < batP + pumpP + goldP) type = "gold";
+  const speed = (135 + lvl * 48) * (type === "bat" ? 1.15 : 1) * (0.85 + rnd() * .3);
+  const rot0 = (rnd() - .5) * 0.5;
+  const x = 44 + rnd() * (W - 88);
+  const vx = type === "bat" ? (rnd() * 2 - 1) * 60 : 0;
+  const vr = (rnd() * 2 - 1) * 2.5;
+  const tech = type === "gold" ? GOLD_TECH : TECHS[Math.floor(rnd() * TECHS.length)];
+  const phase = rnd() * 6;
+  g.items.push({type, x, y: -30, vy: speed, vx, rot: rot0, rot0, vr, s: type === "pumpkin" ? 16 : type === "bat" ? 12 : 8, tech, phase});
+}
+
+function catchItem(g, it, ev) {
+  if (it.type === "bat") {
+    if (g.invuln > 0) return;
+    g.lives--; g.invuln = 1.4; g.shake = .35; g.combo = 0;
+    ev.push({type: "hit", x: it.x, y: it.y});
+    if (g.lives <= 0) { g.ended = true; g.endReason = "bats"; ev.push({type: "end", reason: "bats"}); }
+    return;
+  }
+  if (it.type === "pumpkin") {
+    g.score += 25; g.lives = Math.min(3, g.lives + 1);
+    ev.push({type: "pumpkin", x: it.x, y: it.y});
+    return;
+  }
+  g.combo++; g.candies++; g.maxCombo = Math.max(g.maxCombo, g.combo);
+  const pts = (it.type === "gold" ? 50 : 10) * multFor(g.combo);
+  g.score += pts;
+  g.stack[it.tech.n] = (g.stack[it.tech.n] || 0) + 1;
+  ev.push({type: "catch", x: it.x, y: it.y, pts, tech: it.tech, gold: it.type === "gold", combo: g.combo});
+}
+
+// Entrada de un tick: px (posición del puntero en coordenadas del juego) o teclas.
+function encodeInput(inp, W) {
+  if (inp.px != null && Number.isFinite(inp.px)) return Math.round(Math.max(0, Math.min(W, inp.px)) * 10) / 10;
+  return inp.left ? -2 : inp.right ? -3 : -1;
+}
+function decodeInput(v) {
+  if (v >= 0) return {px: v, left: false, right: false};
+  return {px: null, left: v === -2, right: v === -3};
+}
+function validInputValue(v, W) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return false;
+  if (v === -1 || v === -2 || v === -3) return true;
+  return v >= 0 && v <= W && Math.abs(v * 10 - Math.round(v * 10)) < 1e-6;
+}
+// Codificación por tramos: [valor, repeticiones, valor, repeticiones, ...]
+function encodeRLE(values) {
+  const out = [];
+  for (const v of values) {
+    if (out.length && out[out.length - 2] === v) out[out.length - 1]++; else out.push(v, 1);
+  }
+  return out;
+}
+function rleTicks(rle) { let n = 0; for (let i = 1; i < rle.length; i += 2) n += rle[i]; return n; }
+function validRLE(rle, W) {
+  if (!Array.isArray(rle) || rle.length % 2 !== 0 || rle.length > 2 * MAX_TICKS) return false;
+  for (let i = 0; i < rle.length; i += 2) {
+    const n = rle[i + 1];
+    if (!validInputValue(rle[i], W)) return false;
+    if (!Number.isInteger(n) || n < 1 || n > MAX_TICKS) return false;
+  }
+  return rleTicks(rle) <= MAX_TICKS;
+}
+
+// Avanza un tick. Devuelve los eventos (para sonidos y partículas en el cliente).
+function stepGame(g, inp) {
+  const ev = [];
+  if (g.ended) return ev;
+  const dt = TICK, W = g.W;
+  g.tick++; g.t += dt;
+  g.timeLeft -= dt;
+  if (g.timeLeft <= 1e-9) { g.timeLeft = 0; g.ended = true; g.endReason = "time"; ev.push({type: "end", reason: "time"}); return ev; }
+  const gh = g.ghost, speed = 420 * Math.max(1, W / BASE_W);
+  if (inp.px != null) gh.target = inp.px;
+  else if (inp.left) gh.target = gh.x - speed * dt;
+  else if (inp.right) gh.target = gh.x + speed * dt;
+  gh.target = Math.max(gh.w / 2, Math.min(W - gh.w / 2, gh.target));
+  gh.x += (gh.target - gh.x) * Math.min(1, dt * 14);
+  if (g.invuln > 0) g.invuln -= dt;
+  if (g.shake > 0) g.shake -= dt;
+  const lvl = levelFor(DURATION - g.timeLeft);
+  if (lvl !== g.level) { g.level = lvl; ev.push({type: "level", lvl}); }
+  g.spawnIn -= dt;
+  if (g.spawnIn <= 0) { spawn(g); g.spawnIn = (.95 - lvl * .11) * (0.7 + g.rng() * .6) / Math.max(1, W / BASE_W); }
+  const gy = H - 40, top = gy - gh.h, left = gh.x - gh.w * 0.48, right = gh.x + gh.w * 0.48;
+  for (let i = g.items.length - 1; i >= 0; i--) {
+    const it = g.items[i];
+    it.y += it.vy * dt; it.x += it.vx * dt;
+    if (it.type === "candy" || it.type === "gold") it.rot = it.rot0 + Math.sin(g.t * 2.5 + it.phase) * 0.2; else it.rot += it.vr * dt;
+    if (it.type === "bat") { it.x += Math.sin(g.t * 3 + it.phase) * 40 * dt; if (it.x < 15 || it.x > W - 15) it.vx *= -1; }
+    const m = (it.type === "candy" || it.type === "gold") ? it.s * 1.6 : it.s * 0.4;
+    const hit = it.x > left - m && it.x < right + m && it.y > top && it.y < gy + 6;
+    if (hit) {
+      catchItem(g, it, ev); g.items.splice(i, 1);
+      if (g.ended) return ev;
+      continue;
+    }
+    if (it.y > H + 30) {
+      g.items.splice(i, 1);
+      if (it.type === "candy" || it.type === "gold") {
+        if (g.combo >= 5) ev.push({type: "miss", x: it.x});
+        g.combo = 0;
+      }
+    }
+  }
+  return ev;
+}
+
+function topStack(g) {
+  return Object.entries(g.stack).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0]);
+}
+
+// Simula una partida completa a partir de la semilla, el ancho y los movimientos codificados.
+function simulate(seed, w, rle) {
+  const g = createGame(seed, w);
+  let ticks = 0;
+  for (let i = 0; i < rle.length && !g.ended; i += 2) {
+    const inp = decodeInput(rle[i]);
+    for (let n = 0; n < rle[i + 1] && !g.ended; n++) { stepGame(g, inp); ticks++; }
+  }
+  return {ended: g.ended, reason: g.endReason, ticks, score: Math.min(MAX_SCORE, g.score), candies: g.candies, maxCombo: g.maxCombo, stack: topStack(g)};
+}
+/* ---------- fin del núcleo ---------- */
 let W = BASE_W;
 const canvas = $("game"), ctx = canvas.getContext("2d");
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -492,13 +664,6 @@ function drawGhost(c, x, y, w, h, t, opts = {}) {
   c.restore();
 }
 /* Caramelos tecnológicos: cada envoltorio lleva una tecnología del stack que Rumbo recluta */
-const TECHS = [
-  {n: "K8s", c: "#326CE5"}, {n: "Docker", c: "#2496ED"}, {n: "Java", c: "#E76F00"}, {n: "TS", c: "#3178C6"},
-  {n: "Go", c: "#00ADD8"}, {n: "Quarkus", c: "#4695EB"}, {n: "Spring", c: "#6DB33F"}, {n: "AWS", c: "#FF9900"},
-  {n: "GCP", c: "#4285F4"}, {n: "Azure", c: "#0078D4"}, {n: "Python", c: "#3776AB"}, {n: "React", c: "#1FB6D8"},
-  {n: "Node", c: "#339933"}, {n: "Terraform", c: "#7B42BC"}, {n: "Kafka", c: "#6E5BE8"}, {n: "Rust", c: "#DEA584"}
-];
-const GOLD_TECH = {n: "rumbo", c: "#FFB020", gold: true};
 const randomTech = () => TECHS[Math.floor(Math.random()*TECHS.length)];
 function hexRgb(hex) { return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)]; }
 function shade(hex, k) {
@@ -642,11 +807,11 @@ for (const lc of document.querySelectorAll("#legend canvas")) {
 
 /* ---------- estado del juego ---------- */
 const stars = Array.from({length: 160}, () => ({fx: Math.random(), y: Math.random()*H, r: Math.random()*1.3 + .3, p: Math.random()*6}));
-const state = {
-  screen: "start", t: 0, timeLeft: DURATION, score: 0, candies: 0, combo: 0, maxCombo: 0, lives: 3, stack: {}, level: 0,
-  ghost: {x: W/2, target: W/2, w: 64, h: 78}, items: [], particles: [], floats: [],
-  spawnIn: .6, invuln: 0, shake: 0, endReason: ""
-};
+// state = campos del núcleo (createGame) + campos de interfaz (pantalla, partículas, textos)
+const state = Object.assign({screen: "start", particles: [], floats: [], topStack: []}, createGame(1, W));
+let replay = [];          // entradas de cada tick de la partida en curso (se envían al servidor para verificarla)
+let session = null;       // {gameId, seed, W, offline}
+let acc = 0;              // acumulador del paso fijo
 const keys = {left: false, right: false};
 let pointerX = null;
 
@@ -707,12 +872,12 @@ function drawAmbientFront(c) {
   for (const b of ambient.bats) drawBat(c, b.x, b.y, b.s, t + b.ph);
 }
 
-function resetGame() {
-  Object.assign(state, {t: 0, timeLeft: DURATION, score: 0, candies: 0, combo: 0, maxCombo: 0, lives: 3, stack: {}, level: 0, items: [], particles: [], floats: [], spawnIn: .6, invuln: 0, shake: 0, endReason: ""});
-  state.ghost.x = state.ghost.target = W/2;
+function resetGame(seed, w) {
+  Object.assign(state, createGame(seed == null ? (Math.random() * 2 ** 31) | 0 : seed, w == null ? W : w));
+  state.particles = []; state.floats = []; state.topStack = []; replay = []; acc = 0;
   updateHud();
 }
-function mult() { return Math.min(4, 1 + Math.floor(state.combo / 5)); }
+function mult() { return multFor(state.combo); }
 function updateHud() {
   $("hudScore").textContent = state.score;
   const tl = Math.ceil(state.timeLeft);
@@ -725,23 +890,6 @@ function updateHud() {
   combo.classList.toggle("big", m >= 3);
   combo.textContent = `COMBO ×${m} (${state.combo})`;
 }
-/* Niveles: los primeros 10 s son suaves; luego cada 10 s sube la velocidad, la cadencia y los murciélagos. */
-const MAX_LEVEL = 5;
-function levelFor(elapsed) { return elapsed < 10 ? 0 : Math.min(MAX_LEVEL, 1 + Math.floor((elapsed - 10) / 10)); }
-function spawn() {
-  const lvl = state.level;
-  const roll = Math.random();
-  const batP = .09 + lvl*.045, pumpP = .045, goldP = .06;
-  let type = "candy";
-  if (roll < batP) type = "bat"; else if (roll < batP + pumpP) type = "pumpkin"; else if (roll < batP + pumpP + goldP) type = "gold";
-  const speed = (135 + lvl*48) * (type === "bat" ? 1.15 : 1) * (0.85 + Math.random()*.3);
-  const rot0 = (Math.random() - .5)*0.5;
-  state.items.push({
-    type, x: 44 + Math.random()*(W - 88), y: -30, vy: speed, vx: type === "bat" ? (Math.random()*2 - 1)*60 : 0,
-    rot: rot0, rot0, vr: (Math.random()*2 - 1)*2.5, s: type === "pumpkin" ? 16 : type === "bat" ? 12 : 8,
-    tech: type === "gold" ? GOLD_TECH : randomTech(), phase: Math.random()*6
-  });
-}
 function burst(x, y, color, n = 10) {
   if (reduceMotion) n = 4;
   for (let i = 0; i < n; i++) {
@@ -751,71 +899,34 @@ function burst(x, y, color, n = 10) {
 }
 function float(x, y, text, color, big) { state.floats.push({x, y, text, color, big: !!big, life: big ? 1.6 : .9}); }
 
-function catchItem(it) {
+// Efectos visuales y sonoros de los eventos que produce el núcleo
+function handleEvents(events) {
   const g = state.ghost;
-  if (it.type === "bat") {
-    if (state.invuln > 0) return;
-    state.lives--; state.invuln = 1.4; state.shake = .35; state.combo = 0;
-    burst(it.x, it.y, "#8452FD", 14); float(g.x, g.y - g.h - 10, "¡Ay!", "#FF5A36"); sfx.hit(); buzz([40, 40, 40]);
-    if (state.lives <= 0) endGame("bats");
-    return;
+  for (const e of events) {
+    if (e.type === "hit") { burst(e.x, e.y, "#8452FD", 14); float(g.x, H - 40 - g.h - 10, "¡Ay!", "#FF5A36"); sfx.hit(); buzz([40, 40, 40]); }
+    else if (e.type === "pumpkin") { burst(e.x, e.y, "#ffb347", 16); float(e.x, e.y - 10, "+25 y vida", "#FFB020"); sfx.pumpkin(); }
+    else if (e.type === "catch") { burst(e.x, e.y, e.tech.c, e.gold ? 18 : 9); float(e.x, e.y - 8, `+${e.pts} ${e.tech.n}`, e.gold ? "#FFB020" : "#FAFAFA"); if (e.gold) sfx.gold(); else sfx.candy(e.combo); }
+    else if (e.type === "miss") { float(e.x, H - 20, "combo perdido", "rgba(255,255,255,.64)"); sfx.miss(); }
+    else if (e.type === "level") { float(W/2, H*0.38, `Nivel ${e.lvl + 1}`, "#47EBEB", true); float(W/2, H*0.38 + 26, "más rápido, más murciélagos", "#FAFAFA"); sfx.level(); buzz(30); }
+    else if (e.type === "end") endGame(e.reason);
   }
-  if (it.type === "pumpkin") {
-    state.score += 25; state.lives = Math.min(3, state.lives + 1);
-    burst(it.x, it.y, "#ffb347", 16); float(it.x, it.y - 10, "+25 y vida", "#FFB020"); sfx.pumpkin();
-    return;
-  }
-  state.combo++; state.candies++; state.maxCombo = Math.max(state.maxCombo, state.combo);
-  const base = it.type === "gold" ? 50 : 10, pts = base * mult();
-  state.score += pts;
-  state.stack[it.tech.n] = (state.stack[it.tech.n] || 0) + 1;
-  burst(it.x, it.y, it.tech.c, it.type === "gold" ? 18 : 9);
-  float(it.x, it.y - 8, `+${pts} ${it.tech.n}`, it.type === "gold" ? "#FFB020" : "#FAFAFA");
-  if (it.type === "gold") sfx.gold(); else sfx.candy(state.combo);
 }
+function currentInput() { return {px: pointerX, left: keys.left, right: keys.right}; }
 
 function update(dt) {
   if (state.screen === "pause") return;
-  state.t += dt;
-  if (state.screen !== "play") { updateAmbient(reduceMotion ? dt*.3 : dt); return; }
-  state.timeLeft -= dt;
-  if (state.timeLeft <= 0) { state.timeLeft = 0; endGame("time"); return; }
-  // fantasma
-  const g = state.ghost, speed = 420 * Math.max(1, W/BASE_W);
-  if (pointerX != null) g.target = pointerX;
-  else if (keys.left) g.target = g.x - speed*dt;
-  else if (keys.right) g.target = g.x + speed*dt;
-  g.target = Math.max(g.w/2, Math.min(W - g.w/2, g.target));
-  g.x += (g.target - g.x) * Math.min(1, dt*14);
-  if (state.invuln > 0) state.invuln -= dt;
-  if (state.shake > 0) state.shake -= dt;
-  // nivel y aparición
-  const lvl = levelFor(DURATION - state.timeLeft);
-  if (lvl !== state.level) {
-    state.level = lvl;
-    float(W/2, H*0.38, `Nivel ${lvl + 1}`, "#47EBEB", true); float(W/2, H*0.38 + 26, "más rápido, más murciélagos", "#FAFAFA");
-    sfx.level(); buzz(30);
+  if (state.screen !== "play") { state.t += dt; updateAmbient(reduceMotion ? dt*.3 : dt); return; }
+  // La partida avanza en pasos fijos (TICK) para que el servidor pueda reproducirla exactamente.
+  acc = Math.min(acc + dt, .25);
+  while (acc >= TICK && state.screen === "play") {
+    acc -= TICK;
+    const inp = currentInput();
+    replay.push(encodeInput(inp, state.W));
+    handleEvents(stepGame(state, inp));
   }
-  state.spawnIn -= dt;
-  if (state.spawnIn <= 0) { spawn(); state.spawnIn = (.95 - lvl*.11) * (0.7 + Math.random()*.6) / Math.max(1, W/BASE_W); }
-  // objetos
-  const gy = H - 40, top = gy - g.h, left = g.x - g.w*0.48, right = g.x + g.w*0.48;
-  for (let i = state.items.length - 1; i >= 0; i--) {
-    const it = state.items[i];
-    it.y += it.vy*dt; it.x += it.vx*dt;
-    if (it.type === "candy" || it.type === "gold") it.rot = it.rot0 + Math.sin(state.t*2.5 + it.phase)*0.2; else it.rot += it.vr*dt;
-    if (it.type === "bat") { it.x += Math.sin(state.t*3 + it.phase)*40*dt; if (it.x < 15 || it.x > W - 15) it.vx *= -1; }
-    const m = (it.type === "candy" || it.type === "gold") ? it.s*1.6 : it.s*0.4;
-    const hit = it.x > left - m && it.x < right + m && it.y > top && it.y < gy + 6;
-    if (hit) { catchItem(it); state.items.splice(i, 1); continue; }
-    if (it.y > H + 30) {
-      state.items.splice(i, 1);
-      if (it.type === "candy" || it.type === "gold") {
-        if (state.combo >= 5) { float(it.x, H - 20, "combo perdido", "rgba(255,255,255,.64)"); sfx.miss(); }
-        state.combo = 0;
-      }
-    }
-  }
+  updateHud();
+}
+function updateFx(dt) {
   for (let i = state.particles.length - 1; i >= 0; i--) {
     const p = state.particles[i]; p.life -= dt; p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 220*dt;
     if (p.life <= 0) state.particles.splice(i, 1);
@@ -824,14 +935,14 @@ function update(dt) {
     const f = state.floats[i]; f.life -= dt; f.y -= 40*dt;
     if (f.life <= 0) state.floats.splice(i, 1);
   }
-  updateHud();
 }
 
 function render() {
   const dpr = Math.min(devicePixelRatio || 1, 2);
   const cw = Math.round(canvas.clientWidth*dpr), ch = Math.round(canvas.clientHeight*dpr);
   if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
-  W = Math.max(260, Math.round(H * canvas.clientWidth / Math.max(1, canvas.clientHeight)));
+  const inPlay = state.screen === "play" || state.screen === "pause";
+  if (!inPlay) W = clampW(Math.round(H * canvas.clientWidth / Math.max(1, canvas.clientHeight)));
   const sx = canvas.width / W, sy = canvas.height / H;
   ctx.setTransform(sx, 0, 0, sy, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -877,7 +988,7 @@ function render() {
 let last = performance.now();
 function loop(now) {
   const dt = Math.min(.05, (now - last)/1000); last = now;
-  update(dt); render();
+  update(dt); updateFx(dt); render();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -934,7 +1045,7 @@ function pauseGame() {
 function resumeGame() {
   if (state.screen !== "pause") return;
   $("pauseScreen").hidden = true; $("pauseBtn").hidden = false;
-  state.screen = "play"; last = performance.now();
+  state.screen = "play"; last = performance.now(); acc = 0;
   float(state.ghost.x, H - 140, "¡Sigue!", "#47EBEB", true);
 }
 function paintPauseToggles() {
@@ -959,8 +1070,12 @@ addEventListener("keydown", e => {
   }
 });
 
-function startGame() {
-  resetGame();
+async function startGame() {
+  const btn = $("playBtn"); btn.disabled = true; btn.textContent = "Preparando…";
+  try { session = await beginSession(W); } catch { session = null; }
+  btn.disabled = false; btn.textContent = "Jugar";
+  if (!session) session = {gameId: null, seed: (Math.random() * 2 ** 31) | 0, W, offline: true};
+  resetGame(session.seed, session.W || W);
   state.screen = "play";
   $("startScreen").hidden = true; $("endScreen").hidden = true; $("pauseScreen").hidden = true; $("pauseBtn").hidden = false;
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -978,7 +1093,7 @@ function endGame(reason) {
   $("endTitle").textContent = reason === "bats" ? "Los murciélagos te alcanzaron" : "¡Se acabó el tiempo!";
   $("endScore").textContent = state.score; $("endCandies").textContent = state.candies; $("endCombo").textContent = state.maxCombo;
   const msgs = state.score >= 600 ? "Una noche legendaria. El rumbo más dulce de todos." : state.score >= 300 ? "Dulce rumbo. Vas directo al ranking." : state.score >= 120 ? "Buen comienzo. Los combos hacen la diferencia." : "Los caramelos se escaparon. ¿Otra vuelta?";
-  const top = Object.entries(state.stack).sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0]);
+  const top = topStack(state);
   state.topStack = top;
   $("endMsg").textContent = top.length ? `${msgs} Tu stack de la noche: ${top.join(", ")}.` : msgs;
   if (state.score > myBest) { myBest = state.score; store.set("dr_best", String(myBest)); $("myBest").textContent = `${myBest} pts`; }
@@ -997,7 +1112,7 @@ function note(text, cls) { const n = $("saveNote"); n.textContent = text; n.clas
 /* ---------- ranking compartido (Supabase) ---------- */
 const SUPABASE_URL = "https://ancokatjcscxdixzgult.supabase.co";
 const SUPABASE_ANON_KEY = "sb_publishable_7FwpWyI_TCgURb93Xsh-Gw_1Jxdk9Jd";
-const MAX_SCORE = 5000;
+const FN_URL = SUPABASE_URL + "/functions/v1/";
 const dbState = {db: undefined, uid: null, canWrite: null, resolved: false, rows: []};
 // Identificador anónimo por dispositivo, solo para resaltar tus filas en el ranking.
 dbState.uid = store.get("dr_device") || (() => {
@@ -1031,6 +1146,18 @@ function fmtTime(iso) {
 function cleanName(v) { return (v || "").replace(/\s+/g, " ").trim().slice(0, 20); }
 
 let sb = null;
+async function callFn(name, body) {
+  const r = await fetch(FN_URL + name, {method: "POST", headers: {"Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY}, body: JSON.stringify(body)});
+  let data = null; try { data = await r.json(); } catch {}
+  if (!r.ok) { const err = new Error((data && data.error) || ("HTTP " + r.status)); err.code = data && data.error; err.status = r.status; throw err; }
+  return data;
+}
+// La partida la emite el servidor: la semilla y el ancho quedan registrados para verificarla al terminar.
+async function beginSession(w) {
+  if (!sb) return null;
+  const d = await callFn("game-start", {w, device_id: dbState.uid});
+  return {gameId: d.game_id, seed: d.seed, W: d.w, offline: false};
+}
 async function loadBoard() {
   if (!sb) return;
   const {data, error} = await sb.from("scores_public")
@@ -1056,25 +1183,33 @@ async function loadBoard() {
 $("endForm").addEventListener("submit", async e => {
   e.preventDefault();
   if (!sb) { note("El ranking compartido no está disponible.", "err"); return; }
+  if (!session || !session.gameId) { note("Esta partida se jugó sin conexión con el ranking y no se puede registrar. Juega otra vez.", "err"); return; }
   const name = cleanName(saveName.value);
   if (!name) { note("Escribe un nombre para aparecer en el ranking.", "err"); saveName.focus(); return; }
   store.set("dr_name", name); nameInput.value = name;
-  const btn = $("saveBtn"); btn.disabled = true; btn.textContent = "Guardando…";
-  const row = {name, email: playerEmail(), score: Math.min(MAX_SCORE, state.score), candies: state.candies, max_combo: state.maxCombo, stack: state.topStack || [], reason: state.endReason, device_id: dbState.uid};
-  const {error} = await sb.from("scores").insert(row);
-  if (error) {
+  const btn = $("saveBtn"); btn.disabled = true; btn.textContent = "Verificando…";
+  let res;
+  try {
+    // El servidor vuelve a jugar la partida con la semilla y los movimientos: el puntaje que cuenta es el que calcula él.
+    res = await callFn("game-finish", {game_id: session.gameId, name, email: playerEmail(), inputs: encodeRLE(replay)});
+  } catch (err) {
     btn.disabled = false; btn.textContent = "Guardar puntaje";
-    if (error.code === "42501" || /row-level security/i.test(error.message)) note("El ranking rechazó este puntaje.", "err");
+    const c = err.code || "";
+    if (c === "game_not_found" || c === "already_used" || c === "expired") note("Esta partida ya fue registrada o venció. Juega otra vez.", "err");
+    else if (c === "replay_invalid" || c === "not_finished" || c === "too_fast") note("No pudimos verificar la partida. Juega otra vez.", "err");
+    else if (c === "rate_limited") note("Demasiadas partidas seguidas. Espera unos minutos.", "err");
     else note("No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.", "err");
     return;
   }
+  session.gameId = null; // una partida emitida se registra una sola vez
+  if (res.score !== state.score) $("endScore").textContent = res.score;
   btn.textContent = "Guardado"; $("saveField").hidden = true; btn.hidden = true;
   await loadBoard();
-  // El ranking conserva un solo puntaje por correo (el mejor); si el tuyo no subió, tu marca anterior sigue en pie.
-  const mine = dbState.rows.find(r => r.uid === dbState.uid && r.score === Math.min(MAX_SCORE, state.score));
-  const place = dbState.rows.findIndex(r => r === mine) + 1;
-  if (mine) note(`¡Guardado! Vas en el puesto ${place} del ranking.`, "ok");
-  else note("Guardado. El ranking conserva solo tu mejor puntaje por correo. Sigue jugando para entrar al top 20.", "ok");
+  if (!res.saved) note(`Tu mejor puntaje sigue siendo ${res.best}. El ranking muestra solo tu mejor marca por correo.`, "ok");
+  else {
+    const place = dbState.rows.findIndex(r => r.uid === dbState.uid && r.score === res.score) + 1;
+    note(place ? `¡Guardado y verificado! Vas en el puesto ${place} del ranking.` : "¡Guardado y verificado! Sigue jugando para entrar al top 20.", "ok");
+  }
   setTimeout(openDrawer, 400);
 });
 

@@ -181,3 +181,24 @@ with cand as (
 )
 delete from public.scores_history h using restored r where h.id = r.id;
 alter table public.scores enable trigger scores_keep_best;
+
+-- ---------------------------------------------------------------------------
+-- Partidas verificadas en el servidor (31 de octubre de 2026)
+-- game-start emite una partida (semilla y ancho); game-finish la vuelve a simular con los
+-- movimientos enviados y registra el puntaje real con la clave de servicio.
+-- ---------------------------------------------------------------------------
+create table if not exists public.games (
+  id uuid primary key default gen_random_uuid(),
+  seed integer not null,
+  w integer not null,
+  device_id text,
+  started_at timestamptz not null default now(),
+  used_at timestamptz,
+  score integer
+);
+alter table public.games enable row level security;
+revoke all on public.games from anon, authenticated;
+create index if not exists games_device_started_idx on public.games (device_id, started_at desc);
+
+-- El cliente ya no inserta puntajes: solo lo hace la Edge Function game-finish.
+revoke insert on public.scores from anon, authenticated;

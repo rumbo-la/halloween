@@ -5,6 +5,19 @@ const [,, URL_ARG, KEY_ARG, SITE_ARG] = process.argv;
 const SITE = (SITE_ARG || "https://halloween.rumbo.la").replace(/\/$/, "");
 let html = fs.readFileSync("dulce-rumbo.html", "utf8");
 
+// El núcleo del juego (game-core.js) se copia tal cual dentro del HTML (sin "export") para que
+// el navegador y la Edge Function game-finish simulen exactamente lo mismo.
+{
+  const core = fs.readFileSync("game-core.js", "utf8").replace(/^export /gm, "");
+  const m1 = "/* ---------- núcleo del juego (copiado de game-core.js por build-web.mjs, no editar aquí) ---------- */\n";
+  const m2 = "/* ---------- fin del núcleo ---------- */";
+  const i1 = html.indexOf(m1), i2 = html.indexOf(m2);
+  if (i1 < 0 || i2 < 0) throw new Error("No encuentro los marcadores del núcleo en dulce-rumbo.html");
+  html = html.slice(0, i1 + m1.length) + core + html.slice(i2);
+  fs.writeFileSync("dulce-rumbo.html", html);
+  for (const fn of ["game-start", "game-finish"]) fs.copyFileSync("game-core.js", `supabase/functions/${fn}/game-core.js`);
+}
+
 const start = html.indexOf("/* ---------- ranking compartido (db) ---------- */");
 const end = html.indexOf("/* ---------- panel del ranking ---------- */");
 if (start < 0 || end < 0) throw new Error("No encuentro el bloque del ranking");
@@ -12,7 +25,7 @@ if (start < 0 || end < 0) throw new Error("No encuentro el bloque del ranking");
 const SUPA = `/* ---------- ranking compartido (Supabase) ---------- */
 const SUPABASE_URL = "${URL_ARG || "__SUPABASE_URL__"}";
 const SUPABASE_ANON_KEY = "${KEY_ARG || "__SUPABASE_ANON_KEY__"}";
-const MAX_SCORE = 5000;
+const FN_URL = SUPABASE_URL + "/functions/v1/";
 const dbState = {db: undefined, uid: null, canWrite: null, resolved: false, rows: []};
 // Identificador anónimo por dispositivo, solo para resaltar tus filas en el ranking.
 dbState.uid = store.get("dr_device") || (() => {
@@ -46,6 +59,18 @@ function fmtTime(iso) {
 function cleanName(v) { return (v || "").replace(/\\s+/g, " ").trim().slice(0, 20); }
 
 let sb = null;
+async function callFn(name, body) {
+  const r = await fetch(FN_URL + name, {method: "POST", headers: {"Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY}, body: JSON.stringify(body)});
+  let data = null; try { data = await r.json(); } catch {}
+  if (!r.ok) { const err = new Error((data && data.error) || ("HTTP " + r.status)); err.code = data && data.error; err.status = r.status; throw err; }
+  return data;
+}
+// La partida la emite el servidor: la semilla y el ancho quedan registrados para verificarla al terminar.
+async function beginSession(w) {
+  if (!sb) return null;
+  const d = await callFn("game-start", {w, device_id: dbState.uid});
+  return {gameId: d.game_id, seed: d.seed, W: d.w, offline: false};
+}
 async function loadBoard() {
   if (!sb) return;
   const {data, error} = await sb.from("scores_public")
@@ -71,25 +96,33 @@ async function loadBoard() {
 $("endForm").addEventListener("submit", async e => {
   e.preventDefault();
   if (!sb) { note("El ranking compartido no está disponible.", "err"); return; }
+  if (!session || !session.gameId) { note("Esta partida se jugó sin conexión con el ranking y no se puede registrar. Juega otra vez.", "err"); return; }
   const name = cleanName(saveName.value);
   if (!name) { note("Escribe un nombre para aparecer en el ranking.", "err"); saveName.focus(); return; }
   store.set("dr_name", name); nameInput.value = name;
-  const btn = $("saveBtn"); btn.disabled = true; btn.textContent = "Guardando…";
-  const row = {name, email: playerEmail(), score: Math.min(MAX_SCORE, state.score), candies: state.candies, max_combo: state.maxCombo, stack: state.topStack || [], reason: state.endReason, device_id: dbState.uid};
-  const {error} = await sb.from("scores").insert(row);
-  if (error) {
+  const btn = $("saveBtn"); btn.disabled = true; btn.textContent = "Verificando…";
+  let res;
+  try {
+    // El servidor vuelve a jugar la partida con la semilla y los movimientos: el puntaje que cuenta es el que calcula él.
+    res = await callFn("game-finish", {game_id: session.gameId, name, email: playerEmail(), inputs: encodeRLE(replay)});
+  } catch (err) {
     btn.disabled = false; btn.textContent = "Guardar puntaje";
-    if (error.code === "42501" || /row-level security/i.test(error.message)) note("El ranking rechazó este puntaje.", "err");
+    const c = err.code || "";
+    if (c === "game_not_found" || c === "already_used" || c === "expired") note("Esta partida ya fue registrada o venció. Juega otra vez.", "err");
+    else if (c === "replay_invalid" || c === "not_finished" || c === "too_fast") note("No pudimos verificar la partida. Juega otra vez.", "err");
+    else if (c === "rate_limited") note("Demasiadas partidas seguidas. Espera unos minutos.", "err");
     else note("No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.", "err");
     return;
   }
+  session.gameId = null; // una partida emitida se registra una sola vez
+  if (res.score !== state.score) $("endScore").textContent = res.score;
   btn.textContent = "Guardado"; $("saveField").hidden = true; btn.hidden = true;
   await loadBoard();
-  // El ranking conserva un solo puntaje por correo (el mejor); si el tuyo no subió, tu marca anterior sigue en pie.
-  const mine = dbState.rows.find(r => r.uid === dbState.uid && r.score === Math.min(MAX_SCORE, state.score));
-  const place = dbState.rows.findIndex(r => r === mine) + 1;
-  if (mine) note(\`¡Guardado! Vas en el puesto \${place} del ranking.\`, "ok");
-  else note("Guardado. El ranking conserva solo tu mejor puntaje por correo. Sigue jugando para entrar al top 20.", "ok");
+  if (!res.saved) note(\`Tu mejor puntaje sigue siendo \${res.best}. El ranking muestra solo tu mejor marca por correo.\`, "ok");
+  else {
+    const place = dbState.rows.findIndex(r => r.uid === dbState.uid && r.score === res.score) + 1;
+    note(place ? \`¡Guardado y verificado! Vas en el puesto \${place} del ranking.\` : "¡Guardado y verificado! Sigue jugando para entrar al top 20.", "ok");
+  }
   setTimeout(openDrawer, 400);
 });
 
