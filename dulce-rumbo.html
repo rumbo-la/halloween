@@ -1105,7 +1105,7 @@ function renderBoard() {
 }
 function fmtTime(iso) {
   const d = new Date(iso); if (isNaN(d)) return "";
-  return d.toLocaleTimeString("es-PE", {hour: "2-digit", minute: "2-digit"});
+  return d.toLocaleString("es-PE", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
 }
 function cleanName(v) { return (v || "").replace(/\s+/g, " ").trim().slice(0, 20); }
 
