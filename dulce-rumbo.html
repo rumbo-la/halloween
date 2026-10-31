@@ -1003,7 +1003,7 @@ function cleanName(v) { return (v || "").replace(/\s+/g, " ").trim().slice(0, 20
   if (!db) { boardStatus.textContent = "Sin conexión"; $("writeHint").textContent = "El ranking compartido no está disponible aquí."; return; }
   if (dbState.canWrite === false) $("writeHint").textContent = "Solo lectura: puedes jugar, pero no registrar tu puntaje.";
   let loadTimer = setTimeout(() => { boardStatus.textContent = "Sin respuesta aún"; }, 10000);
-  db.collection("scores").orderBy("score", "desc").limit(10).onSnapshot(snap => {
+  db.collection("scores").orderBy("score", "desc").limit(20).onSnapshot(snap => {
     if (!snap.metadata.fromCache) { clearTimeout(loadTimer); boardStatus.textContent = "En vivo"; boardStatus.classList.add("live"); }
     dbState.rows = snap.docs.map(d => ({id: d.id, ...d.data()}));
     renderBoard();
@@ -1039,7 +1039,7 @@ $("endForm").addEventListener("submit", async e => {
     }
     const better = dbState.rows.filter(r => (r.score ?? 0) > state.score).length;
     const place = better + 1;
-    note(place <= 10 ? `¡Guardado! Vas en el puesto ${place} del ranking.` : "¡Guardado! Sigue jugando para entrar al top 10.", "ok");
+    note(place <= 20 ? `¡Guardado! Vas en el puesto ${place} del ranking.` : "¡Guardado! Sigue jugando para entrar al top 20.", "ok");
     btn.textContent = "Guardado"; $("saveField").hidden = true; btn.hidden = true;
     setTimeout(openDrawer, 400);
   } catch (err) {

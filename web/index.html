@@ -1035,7 +1035,7 @@ async function loadBoard() {
   if (!sb) return;
   const {data, error} = await sb.from("scores_public")
     .select("name,score,candies,max_combo,stack,created_at,device_id")
-    .order("score", {ascending: false}).order("created_at", {ascending: true}).limit(10);
+    .order("score", {ascending: false}).order("created_at", {ascending: true}).limit(20);
   if (error) { boardStatus.textContent = "Sin conexión"; boardStatus.classList.remove("live"); return; }
   dbState.rows = data.map(r => ({name: r.name, score: r.score, candies: r.candies, maxCombo: r.max_combo, stack: r.stack, at: r.created_at, uid: r.device_id}));
   renderBoard();
@@ -1074,7 +1074,7 @@ $("endForm").addEventListener("submit", async e => {
   const mine = dbState.rows.find(r => r.uid === dbState.uid && r.score === Math.min(MAX_SCORE, state.score));
   const place = dbState.rows.findIndex(r => r === mine) + 1;
   if (mine) note(`¡Guardado! Vas en el puesto ${place} del ranking.`, "ok");
-  else note("Guardado. El ranking conserva solo tu mejor puntaje por correo. Sigue jugando para entrar al top 10.", "ok");
+  else note("Guardado. El ranking conserva solo tu mejor puntaje por correo. Sigue jugando para entrar al top 20.", "ok");
   setTimeout(openDrawer, 400);
 });
 
