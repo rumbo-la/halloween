@@ -107,3 +107,77 @@ with ranked as (
 )
 insert into public.scores_history (id, created_at, name, email, score, candies, max_combo, stack, reason, device_id)
 select id, created_at, name, email, score, candies, max_combo, stack, reason, device_id from moved;
+-- ---------------------------------------------------------------------------
+-- Endurecimiento contra inserciones fabricadas por la API (31 de octubre de 2026)
+-- ---------------------------------------------------------------------------
+
+-- 1) La fecha la pone el servidor: el trigger la fija y el cliente no puede insertar id ni created_at.
+create or replace function public.scores_keep_best()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  k text := lower(trim(new.email));
+  best integer;
+begin
+  new.created_at := now();
+  select max(score) into best from public.scores where lower(trim(email)) = k;
+  if best is not null and best >= new.score then
+    return null; -- ya existe un puntaje igual o mayor: no se registra
+  end if;
+  with moved as (
+    delete from public.scores where lower(trim(email)) = k returning *
+  )
+  insert into public.scores_history (id, created_at, name, email, score, candies, max_combo, stack, reason, device_id)
+  select id, created_at, name, email, score, candies, max_combo, stack, reason, device_id from moved;
+  return new;
+end
+$$;
+
+revoke insert on public.scores from anon, authenticated;
+grant insert (name, email, score, candies, max_combo, stack, reason, device_id) on public.scores to anon, authenticated;
+
+-- 2) Política con límites coherentes con una partida real de 60 segundos.
+drop policy if exists "scores_insert" on public.scores;
+create policy "scores_insert" on public.scores for insert to anon, authenticated
+  with check (
+    char_length(btrim(name)) between 1 and 20
+    and email ~* '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]{2,}$'
+    and char_length(email) <= 120
+    and candies between 0 and 220
+    and max_combo between 0 and candies
+    and score between candies * 10 and least(5000, candies * 60 + 300)
+    and coalesce(array_length(stack, 1), 0) <= 3
+    and stack <@ array['K8s','Docker','Java','TS','Go','Quarkus','Spring','AWS','GCP','Azure','Python','React','Node','Terraform','Kafka','Rust','rumbo']::text[]
+    and reason in ('time', 'bats')
+    and coalesce(char_length(device_id), 0) <= 64
+  );
+
+-- 3) Filas fabricadas (ids 51 a 65, lote con fechas falsas) fuera del ranking, marcadas en el historial.
+insert into public.scores_history (id, created_at, name, email, score, candies, max_combo, stack, reason, device_id)
+select id, created_at, name, email, score, candies, max_combo, stack, 'fabricado', device_id
+from public.scores where id >= 51;
+delete from public.scores where id >= 51;
+update public.scores_history set reason = 'fabricado' where id >= 51;
+
+-- Se restaura, para cada jugador afectado sin fila, su mejor partida legítima del historial.
+alter table public.scores disable trigger scores_keep_best;
+with cand as (
+  select h.*, row_number() over (partition by lower(trim(h.email)) order by h.score desc, h.created_at asc) rn
+  from public.scores_history h
+  where h.reason in ('time', 'bats')
+    and h.candies between 0 and 220
+    and h.max_combo between 0 and h.candies
+    and h.score between h.candies * 10 and least(5000, h.candies * 60 + 300)
+    and h.stack <@ array['K8s','Docker','Java','TS','Go','Quarkus','Spring','AWS','GCP','Azure','Python','React','Node','Terraform','Kafka','Rust','rumbo']::text[]
+    and not exists (select 1 from public.scores s where lower(trim(s.email)) = lower(trim(h.email)))
+), restored as (
+  insert into public.scores (id, created_at, name, email, score, candies, max_combo, stack, reason, device_id)
+  overriding system value
+  select id, created_at, name, email, score, candies, max_combo, stack, reason, device_id from cand where rn = 1
+  returning id
+)
+delete from public.scores_history h using restored r where h.id = r.id;
+alter table public.scores enable trigger scores_keep_best;
