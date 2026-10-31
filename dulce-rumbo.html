@@ -1023,7 +1023,16 @@ $("endForm").addEventListener("submit", async e => {
   const btn = $("saveBtn"); btn.disabled = true; btn.textContent = "Guardando…";
   const row = {name, score: state.score, candies: state.candies, maxCombo: state.maxCombo, stack: state.topStack || [], at: new Date().toISOString(), uid: dbState.uid || null, reason: state.endReason};
   try {
-    await db.collection("scores").add(row);
+    // Un solo puntaje por dispositivo: se conserva el mejor
+    const ref = dbState.uid ? db.doc("scores/" + dbState.uid) : null;
+    const prev = ref ? await ref.get() : null;
+    const prevScore = prev && prev.exists ? Number(prev.data().score || 0) : -1;
+    if (prevScore >= state.score) {
+      note(`Tu mejor puntaje sigue siendo ${prevScore}. El ranking muestra solo tu mejor marca.`, "ok");
+      btn.textContent = "Guardado"; $("saveField").hidden = true; btn.hidden = true;
+      setTimeout(openDrawer, 400); return;
+    }
+    if (ref) await ref.set(row); else await db.collection("scores").add(row);
     // Registro con correo: solo lo leen quienes administran el artefacto (regla read admin en registrations)
     if (dbState.uid) {
       db.doc("registrations/" + dbState.uid).set({name, email: playerEmail(), lastScore: state.score, bestScore: Math.max(state.score, myBest), at: row.at}).catch(() => {});

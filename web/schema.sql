@@ -47,3 +47,63 @@ grant select on public.scores_public to anon, authenticated;
 
 -- Los correos se consultan desde el panel de Supabase o con la clave de servicio:
 --   select name, email, max(score) as mejor from public.scores group by name, email order by mejor desc;
+
+-- ---------------------------------------------------------------------------
+-- Un solo puntaje por jugador (correo): se conserva el mejor.
+-- Los intentos superados pasan a scores_history (sin acceso desde el cliente).
+-- ---------------------------------------------------------------------------
+create table if not exists public.scores_history (
+  id bigint,
+  created_at timestamptz,
+  name text,
+  email text,
+  score integer,
+  candies integer,
+  max_combo integer,
+  stack text[],
+  reason text,
+  device_id text,
+  archived_at timestamptz not null default now()
+);
+alter table public.scores_history enable row level security;
+revoke all on public.scores_history from anon, authenticated;
+
+create or replace function public.scores_keep_best()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  k text := lower(trim(new.email));
+  best integer;
+begin
+  select max(score) into best from public.scores where lower(trim(email)) = k;
+  if best is not null and best >= new.score then
+    return null; -- ya existe un puntaje igual o mayor: no se registra
+  end if;
+  with moved as (
+    delete from public.scores where lower(trim(email)) = k returning *
+  )
+  insert into public.scores_history (id, created_at, name, email, score, candies, max_combo, stack, reason, device_id)
+  select id, created_at, name, email, score, candies, max_combo, stack, reason, device_id from moved;
+  return new;
+end
+$$;
+revoke execute on function public.scores_keep_best() from public, anon, authenticated;
+
+drop trigger if exists scores_keep_best on public.scores;
+create trigger scores_keep_best before insert on public.scores
+  for each row execute function public.scores_keep_best();
+
+create index if not exists scores_email_key_idx on public.scores (lower(trim(email)));
+
+-- Limpieza de duplicados existentes: queda el mejor puntaje por correo (ante empate, el más antiguo)
+with ranked as (
+  select id, row_number() over (partition by lower(trim(email)) order by score desc, created_at asc) as rn
+  from public.scores
+), moved as (
+  delete from public.scores s using ranked r where s.id = r.id and r.rn > 1 returning s.*
+)
+insert into public.scores_history (id, created_at, name, email, score, candies, max_combo, stack, reason, device_id)
+select id, created_at, name, email, score, candies, max_combo, stack, reason, device_id from moved;

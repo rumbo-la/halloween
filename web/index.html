@@ -1068,11 +1068,13 @@ $("endForm").addEventListener("submit", async e => {
     else note("No se pudo guardar. Revisa tu conexión e inténtalo de nuevo.", "err");
     return;
   }
-  const better = dbState.rows.filter(r => (r.score ?? 0) > state.score).length;
-  const place = better + 1;
-  note(place <= 10 ? `¡Guardado! Vas en el puesto ${place} del ranking.` : "¡Guardado! Sigue jugando para entrar al top 10.", "ok");
   btn.textContent = "Guardado"; $("saveField").hidden = true; btn.hidden = true;
   await loadBoard();
+  // El ranking conserva un solo puntaje por correo (el mejor); si el tuyo no subió, tu marca anterior sigue en pie.
+  const mine = dbState.rows.find(r => r.uid === dbState.uid && r.score === Math.min(MAX_SCORE, state.score));
+  const place = dbState.rows.findIndex(r => r === mine) + 1;
+  if (mine) note(`¡Guardado! Vas en el puesto ${place} del ranking.`, "ok");
+  else note("Guardado. El ranking conserva solo tu mejor puntaje por correo. Sigue jugando para entrar al top 10.", "ok");
   setTimeout(openDrawer, 400);
 });
 
